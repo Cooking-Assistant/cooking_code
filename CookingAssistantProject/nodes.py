@@ -8,6 +8,8 @@ import numpy as np
 import pandas as pd
 from sentence_transformers import SentenceTransformer
 from state import Hit
+import openai
+import os
 
 ROOT = Path(__file__).resolve().parent
 INDEX_DIR = ROOT / "data" / "test30"
@@ -19,6 +21,20 @@ _embed_model = None
 _faiss = None
 _rowmap = None
 _recipes = None
+
+#nutrition 출력을 위한 OpenAI API key 설정
+openai_client=None
+def _get_openai_client():
+    """OpenAI 클라이언트를 초기화하거나 기존 인스턴스를 반환"""
+    global openai_client
+    if openai_client is None:
+        api_key="put api key here"
+        #api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise ValueError("OPENAI_API_KEY 환경변수가 설정되지 않았습니다.")
+        openai_client = openai.OpenAI(api_key=api_key)
+    return openai_client
+
 
 def _load_embed_model():
     global _embed_model
@@ -143,14 +159,92 @@ def llm_answer_chef_question(question: str, recipe_text: str) -> str:
         return "맛은 달라지지만 사용 가능해요. 향은 약해지고 단맛이 올라갑니다. 양파를 잘게 썰어 초반에 충분히 볶아주세요."
     return "가능은 하지만, 간·조리 시간은 상황에 맞게 조금씩 조정해주세요."
 
+#지수-compute_nutrition
 def compute_nutrition(recipe_text: str) -> Nutrition:
-    return {
-        "calories": 550.0,
-        "protein_g": 20.0,
-        "fat_g": 15.0,
-        "carbs_g": 70.0,
-        "note": "러프 추정"
-    }
+    """
+    OpenAI API를 사용하여 레시피에서 영양 정보를 추출합니다.
+    """
+    try:
+        client = _get_openai_client()
+        
+        # OpenAI에게 보낼 프롬프트 구성
+        prompt = f"""
+다음은 요리 레시피입니다. 이 레시피를 바탕으로 1인분 기준의 영양 정보를 정확하게 분석해주세요.
+
+레시피:
+{recipe_text}
+
+다음 JSON 형식으로 응답해주세요:
+{{
+    "calories": 칼로리(float),
+    "protein_g": 단백질_그램(float),
+    "fat_g": 지방_그램(float),
+    "carbs_g": 탄수화물_그램(float),
+    "note": "분석_방법_또는_주의사항"
+}}
+
+주의사항:
+- 1인분 기준으로 계산해주세요
+- 일반적인 재료의 양을 가정하여 계산해주세요
+- 조리 방법도 고려하여 칼로리를 계산해주세요
+- 숫자만 정확히 입력하고, JSON 형식을 정확히 지켜주세요
+"""
+
+        # OpenAI API 호출
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",  # gpt-4, gpt-3.5-turbo 등 사용 가능
+            messages=[
+                {"role": "system", "content": "당신은 영양학 전문가입니다. 요리 레시피를 분석하여 정확한 영양 정보를 제공합니다."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.3,  # 일관성을 위해 낮은 temperature 사용
+            max_tokens=500
+        )
+        
+        # 응답에서 JSON 추출
+        response_text = response.choices[0].message.content.strip()
+        
+        # JSON 파싱 시도
+        try:
+            # 코드 블록이 있다면 제거
+            if "```json" in response_text:
+                response_text = response_text.split("```json")[1].split("```")[0].strip()
+            elif "```" in response_text:
+                response_text = response_text.split("```")[1].split("```")[0].strip()
+            
+            nutrition_data = json.loads(response_text)
+            
+            # Nutrition 타입에 맞게 변환
+            return {
+                "calories": float(nutrition_data.get("calories", 0.0)),
+                "protein_g": float(nutrition_data.get("protein_g", 0.0)),
+                "fat_g": float(nutrition_data.get("fat_g", 0.0)),
+                "carbs_g": float(nutrition_data.get("carbs_g", 0.0)),
+                "note": str(nutrition_data.get("note", "OpenAI API로 분석됨"))
+            }
+            
+        except (json.JSONDecodeError, ValueError, KeyError) as e:
+            print(f"JSON 파싱 에러: {e}")
+            print(f"원본 응답: {response_text}")
+            # 파싱 실패 시 기본값 반환
+            return {
+                "calories": 500.0,
+                "protein_g": 20.0,
+                "fat_g": 15.0,
+                "carbs_g": 60.0,
+                "note": f"OpenAI 응답 파싱 실패 - 기본값 사용 (에러: {str(e)})"
+            }
+    
+    except Exception as e:
+        print(f"OpenAI API 호출 에러: {e}")
+        # API 호출 실패 시 기본값 반환
+        return {
+            "calories": 550.0,
+            "protein_g": 20.0,
+            "fat_g": 15.0,
+            "carbs_g": 70.0,
+            "note": f"OpenAI API 호출 실패 - 기본값 사용 (에러: {str(e)})"
+        }
 
 def append_jsonl(path: str, event: Dict[str, Any]) -> None:
     with open(path, "a", encoding="utf-8") as f:
