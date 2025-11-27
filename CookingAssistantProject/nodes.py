@@ -2,39 +2,25 @@
 from state import State, Hit, Nutrition, Prefs
 from typing import Dict, Any, List, Optional
 from pathlib import Path
+import os
+import openai
 import faiss
 import time, json, re
 import numpy as np
 import pandas as pd
 from sentence_transformers import SentenceTransformer
 from state import Hit
-import openai
-import os
 
 ROOT = Path(__file__).resolve().parent
-INDEX_DIR = ROOT / "data" / "test30"
-FAISS_PATH = INDEX_DIR / "recipes30.faiss"         # 실제 파일명에 맞춰 조정
-ROWMAP_PATH = INDEX_DIR / "rows30.map.csv"         # 실제 파일명에 맞춰 조정
-RECIPES_PATH = INDEX_DIR / "recipes30_clean.jsonl" # 여기에 네 jsonl
+INDEX_DIR = ROOT / "data" / "test30" 
+FAISS_PATH = INDEX_DIR / "recipes30.faiss"
+ROWMAP_PATH = INDEX_DIR / "rows30.map.csv"
+RECIPES_PATH = INDEX_DIR / "recipes30_clean.jsonl"
 
 _embed_model = None
 _faiss = None
 _rowmap = None
 _recipes = None
-
-#nutrition 출력을 위한 OpenAI API key 설정
-openai_client=None
-def _get_openai_client():
-    """OpenAI 클라이언트를 초기화하거나 기존 인스턴스를 반환"""
-    global openai_client
-    if openai_client is None:
-        api_key="put api key here"
-        #api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise ValueError("OPENAI_API_KEY 환경변수가 설정되지 않았습니다.")
-        openai_client = openai.OpenAI(api_key=api_key)
-    return openai_client
-
 
 def _load_embed_model():
     global _embed_model
@@ -77,26 +63,62 @@ def _load_recipes():
         _recipes = recs
     return _recipes
 
+def _get_chef_llm():
+    global _chef_llm
+    if _chef_llm is None:
+        _chef_llm = ChatOpenAI(
+            model="gpt-4.1-mini", 
+            temperature=0.3,
+        )
+    return _chef_llm
+
 def build_query_from_constraints(cons: Dict[str, Any]) -> str:
-    q = cons.get("query", "").lower()
-    base = []
+    """
+    추출된 제약을 기반으로 RAG 검색용 쿼리 문자열 구성
+    예) chocolate dessert easy recipe quick 15 min
+    """
+    tokens: List[str] = []
 
-    if "chicken" in q or "닭" in q:
-        base.append("chicken")
-    if "breast" in q or "가슴살" in q:
-        base.append("breast")
-    if cons.get("diet") == "high_protein":
-        base.append("high protein")
-    if cons.get("time_limit"):
-        base.append(f"quick {cons['time_limit']} min")
-    if "dessert" in q or "디저트" in q:
-        base.append("dessert")
+    # 1) 재료
+    for ing in cons.get("main_ingredients", []):
+        tokens.append(ing)
 
-    base.append("easy recipe")
-    return " ".join(base)
+    # 2) 카테고리 (dessert, cake, salad 등)
+    for cat in cons.get("categories", []):
+        tokens.append(cat)
 
-def rag_search(cons: Dict[str, Any], k: int = 3) -> List[Hit]:
-    """FAISS 인덱스를 사용해 query와 가장 유사한 레시피를 검색"""
+    # 3) 식단
+    diet = cons.get("diet")
+    if diet == "high_protein":
+        tokens.append("high protein")
+    elif diet == "low_carb":
+        tokens.append("low carb")
+    elif diet == "diet":
+        tokens.append("healthy")
+
+    # 4) 시간 제한
+    time_limit = cons.get("time_limit")
+    if time_limit:
+        tokens.append("quick")
+        tokens.append(f"{time_limit} min")
+
+    # 5) 항상 붙이는 기본 토큰
+    tokens.append("easy recipe")
+    
+    # 혹시 아무것도 못 뽑았을 때는 raw_query도 조금 섞어주기
+    if len(tokens) <= 2:
+        raw = cons.get("raw_query", "").lower()
+        if raw:
+            tokens.append(raw)
+
+    return " ".join(tokens)
+
+
+def rag_search(cons: Dict[str, Any], k: int = 5) -> List[Hit]:
+    """
+    FAISS 인덱스를 사용해 query와 가장 유사한 레시피를 검색하고,
+    cons(재료/카테고리)를 이용해서 필터링/재정렬한 뒤 상위 k개만 반환.
+    """
     query = build_query_from_constraints(cons)
 
     model = _load_embed_model()
@@ -104,26 +126,25 @@ def rag_search(cons: Dict[str, Any], k: int = 3) -> List[Hit]:
     rowmap = _load_rowmap()
     recipes = _load_recipes()
 
-    # 1) 쿼리 임베딩 (인덱스 만들 때와 동일: all-MiniLM-L6-v2 + L2 normalize)
+    # 1) 쿼리 임베딩
     q = model.encode([query], convert_to_numpy=True).astype("float32")
     faiss.normalize_L2(q)
 
-    # 2) 검색
-    scores, ids = index.search(q, k)
+    # 2) 넉넉하게 pool_k개 뽑기 (예: k=5 → 최대 25개)
+    pool_k = min(max(k * 5, k), index.ntotal)
+    scores, ids = index.search(q, pool_k)
     scores, ids = scores[0], ids[0]
 
     hits: List[Hit] = []
     for score, idx in zip(scores, ids):
         if idx == -1:
             continue
-
-        # title: rowmap의 idx번째 행
+        
         if 0 <= idx < len(rowmap):
             title = str(rowmap.iloc[idx]["title"])
         else:
             title = f"recipe_{idx}"
 
-        # text: recipes30_clean.jsonl의 idx번째 레코드의 doc_text
         if 0 <= idx < len(recipes):
             rec = recipes[idx]
             text = rec.get("doc_text", "")
@@ -131,12 +152,11 @@ def rag_search(cons: Dict[str, Any], k: int = 3) -> List[Hit]:
             text = title  # fallback
 
         hits.append({
-            "id": str(idx),
+            "id": f"r{idx}",          # ★ main.py에서 숫자/ID 둘 다 지원
             "title": title,
             "score": float(score),
             "text": text,
         })
-
     if not hits:
         hits.append({
             "id": "fallback",
@@ -144,148 +164,226 @@ def rag_search(cons: Dict[str, Any], k: int = 3) -> List[Hit]:
             "score": 0.0,
             "text": "재료 준비\n조리\n완성",
         })
+        return hits
+    
+    # =========================
+    # 1️⃣ cons 기반 필터링 (재료/카테고리)
+    # =========================
+    filters: List[str] = []
 
-    return hits
+    for ing in cons.get("main_ingredients", []):
+        filters.append(ing.lower())
 
-# ========= Mock Services (나중에 GPT/RAG로 교체) =========
+    for cat in cons.get("categories", []):
+        filters.append(cat.lower())
+
+    if filters:
+        filtered_hits: List[Hit] = []
+        for h in hits:
+            text_l = (h["title"] + " " + h["text"]).lower()
+            # 재료/카테고리 키워드가 하나라도 들어가면 통과
+            if any(f in text_l for f in filters):
+                filtered_hits.append(h)
+
+        if filtered_hits:
+            hits = filtered_hits
+
+    # (필요하면 여기서 bonus 점수 로직 추가 가능)
+
+    return hits[:k]
+
+# ========= Mock Services (질문 처리 등) =========
+
 def llm_extract_constraints(text: str) -> Dict[str, Any]:
-    diet = "high_protein" if ("단백질" in text or "닭가슴살" in text) else None
-    m = re.search(r"(\d+)\s*분", text)
-    limit = int(m.group(1)) if m else None
-    return {"query": text, "diet": diet, "time_limit": limit}
+    """
+    간단한 룰 기반 파서:
+    - 주요 재료(main_ingredients)
+    - 카테고리(디저트, 샐러드 등)
+    - 식단 타입(고단백 등)
+    - 시간 제한(몇 분)
+    """
+    t = text.strip()
+    t_lower = t.lower()
 
-def llm_answer_chef_question(question: str, recipe_text: str) -> str:
-    if "마늘" in question and "양파" in question:
-        return "맛은 달라지지만 사용 가능해요. 향은 약해지고 단맛이 올라갑니다. 양파를 잘게 썰어 초반에 충분히 볶아주세요."
-    return "가능은 하지만, 간·조리 시간은 상황에 맞게 조금씩 조정해주세요."
+    main_ingredients: List[str] = []
+    categories: List[str] = []
+    diet: Optional[str] = None
+    time_limit: Optional[int] = None
+
+    # 1) 재료 키워드
+    for k, v in INGREDIENT_KEYWORDS.items():
+        if k in t or k in t_lower:
+            if v not in main_ingredients:
+                main_ingredients.append(v)
+
+    # 2) 카테고리 키워드
+    for k, v in CATEGORY_KEYWORDS.items():
+        if k in t or k in t_lower:
+            if v not in categories:
+                categories.append(v)
+
+    # 3) 식단 키워드 (단일 값으로만)
+    for k, v in DIET_KEYWORDS.items():
+        if k in t or k in t_lower:
+            diet = v
+            break
+
+    # 4) 시간 제한 (예: "15분", "20 분")
+    m = re.search(r"(\d+)\s*분", t)
+    if m:
+        time_limit = int(m.group(1))
+
+    return {
+        "raw_query": t,              # 원본 문장도 같이 보관
+        "main_ingredients": main_ingredients,
+        "categories": categories,
+        "diet": diet,
+        "time_limit": time_limit,
+    }
+
+# ========= 레시피 추출 및 질의응답 =========
+
+def extract_steps(recipe_text: str) -> List[str]:
+    """
+    레시피 전체 텍스트에서 실제 조리 단계만 뽑아낸다.
+    - 기본 규칙:
+      1) 줄 단위로 나눈 뒤
+      2) 'Directions:' 이후 부분만 보고
+      3) '1. ...', '2. ...' 같이 번호 붙은 줄만 스텝으로 사용
+      4) 번호 붙은 줄이 하나도 없으면 Directions: 이후 줄 전체를 스텝으로 사용
+    """
+    # 1) 줄 단위로 나누고 공백 제거
+    lines = [l.strip() for l in recipe_text.splitlines() if l.strip()]
+
+    # 2) 'Directions:' 위치 찾기 (대소문자 무시)
+    start_idx = 0
+    for i, line in enumerate(lines):
+        if line.lower().startswith("directions"):
+            start_idx = i + 1
+            break
+
+    candidate_lines = lines[start_idx:]  # Directions: 이후만 사용
+
+    # 3) '1. ...', '2. ...' 같은 numbered step만 추출
+    steps: List[str] = []
+    for line in candidate_lines:
+        m = re.match(r"\d+\.\s*(.+)", line)
+        if m:
+            steps.append(m.group(1).strip())
+
+    # 4) numbered step이 하나도 없으면, Directions: 이후 전체를 step으로 취급
+    if not steps:
+        steps = candidate_lines
+
+    return steps
+    
+def llm_answer_chef_question(
+    question: str,
+    recipe_text: str,
+    current_step: Optional[str] = None,
+) -> str:
+    
+    llm = _get_chef_llm()
+
+    system = SystemMessage(content=(
+        "당신은 요리 조리 과정을 안내하는 셰프 에이전트입니다.\n"
+        "- 사용자의 현재 조리 단계와 전체 레시피를 바탕으로 최대한 정확하게 답변해야 합니다.\n"
+        "- 레시피에 없는 내용은 일반적인 요리 상식 범위에서만 추론해야 합니다.\n"
+        "- 답변은 한국어로, 2~4문장 정도로 간결하게 해야 합니다.\n"
+        "- 위험할 수 있는 조리법(상한 재료 사용, 덜 익힌 닭/돼지고기 등)은 명확히 경고해야 합니다.\n"
+    ))
+
+    context_parts = []
+    if current_step:
+        context_parts.append(f"[현재 스텝]\n{current_step}") # 현재 조리 단계
+    if recipe_text:
+        context_parts.append(f"[전체 레시피]\n{recipe_text}") # 전체 조리 단계
+
+    context = "\n\n".join(context_parts) if context_parts else "(레시피 정보 없음)"
+
+    human = HumanMessage(content=(
+        f"이 단계에서 사용자의 질문은 다음과 같습니다:\n{question}\n\n"
+        f"전체 레시피 정보는 다음과 같습니다:\n{context}\n\n"
+        "위 정보를 바탕으로 질문에 적절히 답변해주세요."
+    ))
+    
+    messages = [system, human]
+    resp = llm.invoke(messages) # LLM 호출 및 답변 생성
+    return resp.content.strip() # LLM이 응답한 텍스트만 반환
+
+openai_client = None
+
+def _get_openai_client():
+    """
+    OpenAI 클라이언트를 초기화하거나 기존 인스턴스를 반환
+    """
+    global openai_client
+    if openai_client is None:
+        api_key = "put your api_key"
+        # api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise ValueError("OPENAI_API_KEY 환경변수가 설정되지 않았습니다.")
+        openai_client = openai.OpenAI(api_key=api_key)
+    return openai_client
+
+# ========= 영양성분 계산 =========
 
 #지수-compute_nutrition
 def compute_nutrition(recipe_text: str) -> Nutrition:
-    """
-    OpenAI API를 사용하여 레시피에서 영양 정보를 추출합니다.
-    """
-    try:
-        client = _get_openai_client()
-        
-        # OpenAI에게 보낼 프롬프트 구성
-        prompt = f"""
-다음은 요리 레시피입니다. 이 레시피를 바탕으로 1인분 기준의 영양 정보를 정확하게 분석해주세요.
-
-레시피:
-{recipe_text}
-
-다음 JSON 형식으로 응답해주세요:
-{{
-    "calories": 칼로리(float),
-    "protein_g": 단백질_그램(float),
-    "fat_g": 지방_그램(float),
-    "carbs_g": 탄수화물_그램(float),
-    "note": "분석_방법_또는_주의사항"
-}}
-
-주의사항:
-- 1인분 기준으로 계산해주세요
-- 일반적인 재료의 양을 가정하여 계산해주세요
-- 조리 방법도 고려하여 칼로리를 계산해주세요
-- 숫자만 정확히 입력하고, JSON 형식을 정확히 지켜주세요
-"""
-
-        # OpenAI API 호출
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",  # gpt-4, gpt-3.5-turbo 등 사용 가능
-            messages=[
-                {"role": "system", "content": "당신은 영양학 전문가입니다. 요리 레시피를 분석하여 정확한 영양 정보를 제공합니다."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.3,  # 일관성을 위해 낮은 temperature 사용
-            max_tokens=500
-        )
-        
-        # 응답에서 JSON 추출
-        response_text = response.choices[0].message.content.strip()
-        
-        # JSON 파싱 시도
-        try:
-            # 코드 블록이 있다면 제거
-            if "```json" in response_text:
-                response_text = response_text.split("```json")[1].split("```")[0].strip()
-            elif "```" in response_text:
-                response_text = response_text.split("```")[1].split("```")[0].strip()
-            
-            nutrition_data = json.loads(response_text)
-            
-            # Nutrition 타입에 맞게 변환
-            return {
-                "calories": float(nutrition_data.get("calories", 0.0)),
-                "protein_g": float(nutrition_data.get("protein_g", 0.0)),
-                "fat_g": float(nutrition_data.get("fat_g", 0.0)),
-                "carbs_g": float(nutrition_data.get("carbs_g", 0.0)),
-                "note": str(nutrition_data.get("note", "OpenAI API로 분석됨"))
-            }
-            
-        except (json.JSONDecodeError, ValueError, KeyError) as e:
-            print(f"JSON 파싱 에러: {e}")
-            print(f"원본 응답: {response_text}")
-            # 파싱 실패 시 기본값 반환
-            return {
-                "calories": 500.0,
-                "protein_g": 20.0,
-                "fat_g": 15.0,
-                "carbs_g": 60.0,
-                "note": f"OpenAI 응답 파싱 실패 - 기본값 사용 (에러: {str(e)})"
-            }
-    
-    except Exception as e:
-        print(f"OpenAI API 호출 에러: {e}")
-        # API 호출 실패 시 기본값 반환
-        return {
-            "calories": 550.0,
-            "protein_g": 20.0,
-            "fat_g": 15.0,
-            "carbs_g": 70.0,
-            "note": f"OpenAI API 호출 실패 - 기본값 사용 (에러: {str(e)})"
-        }
+    return {
+        "calories": 550.0,
+        "protein_g": 20.0,
+        "fat_g": 15.0,
+        "carbs_g": 70.0,
+        "note": "러프 추정"
+    }
 
 def append_jsonl(path: str, event: Dict[str, Any]) -> None:
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(event, ensure_ascii=False) + "\n")
 
-
 # ========= Agents =========
+
 def planner_agent(state: State) -> State:
-    # 마지막 user 메시지 찾기
+    # 마지막 user 메시지 찾기 (팀원 버전 로직 유지)
+    messages = state.get("messages", [])
     last_user = ""
-    for m in reversed(state.get("messages", [])):
-        if isinstance(m, dict) and m.get("role") == "user":
-            last_user = m.get("content", "")
-            break
+    if messages:
+        last_msg = messages[-1]
+        if isinstance(last_msg, dict):
+            last_user = last_msg.get("content", "")
+        elif hasattr(last_msg, "content"):
+            last_user = last_msg.content
 
     # 1️⃣ 사용자 입력에서 제약 추출
     cons = llm_extract_constraints(last_user)
 
-    # 2️⃣ RAG 검색 쿼리 생성 (build_query_from_constraints 사용)
+    # 2️⃣ RAG 검색 쿼리 생성
     query_str = build_query_from_constraints(cons)
 
-    # 3️⃣ 검색 실행
-    k = max(1, state.get("topk", 3))
+    # 3️⃣ 검색 실행 (기본 5개)
+    k = state.get("topk", 5)
     hits = rag_search(cons, k=k)
 
-    # 4️⃣ 로그 메시지 (쿼리 + 결과)
     msg_query = {
         "role": "system",
         "content": f"🔍 검색 쿼리: {query_str}",
     }
+    
+    recommendations = []
+    for i, h in enumerate(hits, 1):
+        recommendations.append(f"{i}. [{h['id']}] {h['title']}")
 
     msg_result = {
         "role": "assistant",
         "content": (
-            "요청을 바탕으로 아래 요리를 추천합니다.\n"
-            "원하시는 레시피 ID를 선택해 주세요. (예: action=choose:r2)\n" +
-            "\n".join([f"- {h['id']}: {h['title']} (score {h['score']:.2f})" for h in hits])
+            f"요청을 바탕으로 {len(hits)}개의 요리를 추천합니다.\n\n"
+            + "\n".join(recommendations)
+            + "\n\n원하시는 레시피를 선택해 주세요.\n"
+            "예시: action=choose:r2"
         ),
     }
 
-    # 5️⃣ 결과 반환 (쿼리 로그도 messages에 함께 추가)
     return {
         "constraints": cons,
         "candidates": hits,
@@ -307,21 +405,49 @@ def choose_agent(state: State) -> State:
         chosen_id = state["candidates"][0]["id"]  # fallback: top-1
 
     if not chosen_id:
+        candidates = state.get("candidates", [])
+        recommendations = []
+        for i, h in enumerate(candidates, 1):
+            recommendations.append(f"{i}. [{h['id']}] {h['title']}")
+
         return {
             "last_agent": "choose",
             "next_intent": "need_selection",
-            "messages": [{"role":"assistant","content":"선택된 레시피가 없어요. action=choose:<id> 형태로 선택해 주세요."}],
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": (
+                        "선택된 레시피가 없어요. 아래 목록에서 선택해 주세요:\n\n"
+                        + "\n".join(recommendations)
+                        + "\n\n예시: action=choose:r2"
+                    ),
+                }
+            ],
         }
 
     hit = next((h for h in state.get("candidates", []) if h["id"] == chosen_id), None)
     if not hit:
+        candidates = state.get("candidates", [])
+        recommendations = []
+        for i, h in enumerate(candidates, 1):
+            recommendations.append(f"{i}. [{h['id']}] {h['title']}")
+
         return {
             "last_agent": "choose",
             "next_intent": "need_selection",
-            "messages":[{"role":"assistant","content":"해당 ID의 후보를 찾지 못했어요. 목록에서 다시 선택해 주세요."}],
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": (
+                        f"'{chosen_id}'는 유효하지 않은 ID예요. 아래 목록에서 다시 선택해 주세요:\n\n"
+                        + "\n".join(recommendations)
+                        + "\n\n예시: action=choose:r2"
+                    ),
+                }
+            ],
         }
 
-    steps = [s for s in hit["text"].splitlines() if s.strip()]
+    steps = extract_steps(hit["text"])
 
     return {
         "selected_id": hit["id"],
@@ -331,7 +457,16 @@ def choose_agent(state: State) -> State:
         "selection_required": False,
         "last_agent": "choose",
         "next_intent": "cook_next",
-        "messages":[{"role":"assistant","content":f"'{hit['title']}' 레시피로 진행합니다. action=next_step 으로 조리를 시작해 주세요."}],
+        "messages": [
+            {
+                "role": "assistant",
+                "content": (
+                    f"✅ '{hit['title']}' 레시피로 진행합니다!\n\n"
+                    f"총 {len(steps)}단계의 조리 과정이 있습니다.\n"
+                    f"'action=next_step'으로 조리를 시작해 주세요."
+                ),
+            }
+        ],
     }
 
 
@@ -342,15 +477,65 @@ def chef_agent(state: State) -> State:
 
     # 1) 질문 처리
     if act.startswith("ask:"):
-        q = state["action"][len("ask:"):].strip()
-        ans = llm_answer_chef_question(q, state.get("recipe_text", ""))
+        q = state["action"][len("ask:"):].strip() # user의 질문 추출
+        steps = state.get("steps", []) or [] # 현재 레시피 step
+        idx = state.get("step_idx", 0) # step index
+
+        # 현재 혹은 직전 스텝을 같이 넘겨주면 답변 품질 ↑
+        cur_step = None
+        if 0 <= idx - 1 < len(steps):
+            cur_step = steps[idx - 1]
+        elif 0 <= idx < len(steps):
+            cur_step = steps[idx]
+
+        ans = llm_answer_chef_question(
+            q, 
+            state.get("recipe_text", "") or "",
+            current_step=cur_step,
+        )
         return {
             "last_agent": "chef",
-            "next_intent": "cook_next",  # 계속 조리 문맥 유지
+            "next_intent": "cook_next",
             "messages":[{"role":"assistant","content":f"Q: {q}\nA: {ans}"}],
         }
+        
+    # 2) 현재 스텝 반복 (레시피 다시 보여줌)
+    if act == "repeat_step" and idx > 0 and idx <= len(steps):
+        step = steps[idx - 1]
+        return {
+            "last_agent": "chef",
+            "next_intent": "cook_next",
+            "messages":[{"role":"assistant","content":f"[Step {idx}/{len(steps)} 다시 안내] {step}"}],
+        }
+    
+    # 3) 이전 스텝으로 이동
+    if act == "prev_step":
+        if idx <= 1:
+            # 이미 첫 단계 이전이면 그냥 첫 단계 또는 안내 메시지
+            if steps:
+                return {
+                    "step_idx": 1,
+                    "last_agent": "chef",
+                    "next_intent": "cook_next",
+                    "messages":[{"role":"assistant","content":f"이미 첫 번째 단계입니다. [Step 1/{len(steps)}] {steps[0]}"}],
+                }
+            else:
+                return {
+                    "last_agent": "chef",
+                    "next_intent": "cook_next",
+                    "messages":[{"role":"assistant","content":"진행 중인 조리 단계가 없어요."}],
+                }
 
-    # 2) 다음 스텝 진행
+        new_idx = idx - 1 # 한 단계 앞으로
+        step = steps[new_idx - 1]
+        return {
+            "step_idx": new_idx,
+            "last_agent": "chef",
+            "next_intent": "cook_next",
+            "messages":[{"role":"assistant","content":f"[Step {new_idx}/{len(steps)}] {step}"}],
+        }
+
+    # 4) 다음 스텝 진행
     if act == "next_step" and idx < len(steps):
         step = steps[idx]
         return {
@@ -359,26 +544,43 @@ def chef_agent(state: State) -> State:
             "next_intent": "cook_next",  # 여전히 다음 스텝 가능
             "messages":[{"role":"assistant","content":f"[Step {idx+1}/{len(steps)}] {step}"}],
         }
-
-    # 3) 스텝이 끝났거나, stop이거나, 유효한 next_step이 아닌 경우 → 영양 분석으로
+    
+    # 5) stop이 들어오면 바로 종료하고 영양 분석으로 이동
+    if act == "stop":
+        return {
+            "last_agent": "chef",
+            "next_intent": "analyze_nutrition",
+            "messages":[{"role":"assistant","content":"조리를 마친 것으로 처리할게요. 이제 영양 정보를 계산해 보겠습니다."}],
+        }
+    
+    # 스텝이 끝났거나, 유효한 action이 아닌 경우 바로 종료하고 영양 분석으로 이동
     return {
         "last_agent": "chef",
         "next_intent": "analyze_nutrition",
-        "messages":[{"role":"assistant","content":"조리를 마쳤다고 판단했어요. 이제 영양 정보를 계산할게요."}],
+        "messages":[{"role":"assistant","content":"조리를 마쳤다고 판단했어요. 이제 영양 정보를 계산해 보겠습니다."}],
     }
 
 
 def nutrition_agent(state: State) -> State:
     nut = compute_nutrition(state.get("recipe_text", "") or "")
-    text = f"대략 {nut['calories']}kcal / 단백질 {nut['protein_g']}g / 지방 {nut['fat_g']}g / 탄수화물 {nut['carbs_g']}g"
+    text = (
+        f"📊 영양 정보 (대략 추정)\n\n"
+        f"• 칼로리: {nut['calories']}kcal\n"
+        f"• 단백질: {nut['protein_g']}g\n"
+        f"• 지방: {nut['fat_g']}g\n"
+        f"• 탄수화물: {nut['carbs_g']}g\n\n"
+        f"({nut['note']})"
+    )
 
     return {
         "nutrition": nut,
         "last_agent": "nutrition",
         "next_intent": "write_memory",
-        "messages":[{"role":"assistant","content":f"[Nutrition] {text} (러프 추정입니다.)"}],
+        "messages": [{"role": "assistant", "content": text}],
     }
 
+
+MEMORY_PATH = ROOT / "data" / "user_memory.jsonl"
 
 def memory_agent(state: State) -> State:
     ev = {
