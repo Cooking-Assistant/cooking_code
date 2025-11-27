@@ -9,7 +9,10 @@ import time, json, re
 import numpy as np
 import pandas as pd
 from sentence_transformers import SentenceTransformer
-from state import Hit
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage, SystemMessage
+
+# ======== 경로 설정 ========
 
 ROOT = Path(__file__).resolve().parent
 INDEX_DIR = ROOT / "data" / "test30" 
@@ -21,6 +24,58 @@ _embed_model = None
 _faiss = None
 _rowmap = None
 _recipes = None
+_chef_llm = None
+
+# ======== 간단 키워드 매핑 (한글/영어) ========
+
+INGREDIENT_KEYWORDS = {
+    # 육류
+    "닭": "chicken", "닭가슴살": "chicken breast", "치킨": "chicken",
+    "소고기": "beef", "스테이크": "steak", "비프": "beef",
+    "돼지고기": "pork", "돼지": "pork", "베이컨": "bacon", "햄": "ham",
+    "소시지": "sausage", "양고기": "lamb",
+
+    # 해산물
+    "새우": "shrimp", "연어": "salmon", "참치": "tuna", "생선": "fish",
+    "게": "crab", "조개": "clam",
+
+    # 채소/과일
+    "양파": "onion", "마늘": "garlic", "파": "green onion",
+    "감자": "potato", "고구마": "sweet potato", "토마토": "tomato",
+    "버섯": "mushroom", "당근": "carrot", "시금치": "spinach",
+    "옥수수": "corn", "브로콜리": "broccoli", "아보카도": "avocado",
+    "사과": "apple", "바나나": "banana", "딸기": "strawberry", "레몬": "lemon",
+
+    # 유제품/알
+    "계란": "egg", "달걀": "egg", "치즈": "cheese", "우유": "milk",
+    "버터": "butter", "크림": "cream", "요거트": "yogurt",
+
+    # 기타
+    "초콜릿": "chocolate", "초코": "chocolate", "쌀": "rice",
+    "밥": "rice", "면": "noodle", "파스타": "pasta", "빵": "bread",
+    "설탕": "sugar", "소금": "salt", "두부": "tofu", "김치": "kimchi",
+}
+
+CATEGORY_KEYWORDS = {
+    "디저트": "dessert",
+    "디저트류": "dessert",
+    "dessert": "dessert",
+    "케이크": "cake",
+    "cake": "cake",
+    "쿠키": "cookie",
+    "cookie": "cookie",
+    "음료": "drink",
+    "drink": "drink",
+    "샐러드": "salad",
+    "salad": "salad",
+}
+
+DIET_KEYWORDS = {
+    "다이어트": "diet",
+    "저탄수": "low_carb",
+    "저탄수화물": "low_carb",
+    "고단백": "high_protein",
+}
 
 def _load_embed_model():
     global _embed_model
@@ -328,15 +383,87 @@ def _get_openai_client():
 
 # ========= 영양성분 계산 =========
 
-#지수-compute_nutrition
 def compute_nutrition(recipe_text: str) -> Nutrition:
-    return {
-        "calories": 550.0,
-        "protein_g": 20.0,
-        "fat_g": 15.0,
-        "carbs_g": 70.0,
-        "note": "러프 추정"
-    }
+    """
+    OpenAI API를 사용하여 레시피에서 영양 정보를 추출합니다.
+    (지수 버전 코드 그대로 사용)
+    """
+    try:
+        client = _get_openai_client()
+
+        prompt = f"""
+다음은 요리 레시피입니다. 이 레시피를 바탕으로 1인분 기준의 영양 정보를 정확하게 분석해주세요.
+
+레시피:
+{recipe_text}
+
+다음 JSON 형식으로 응답해주세요:
+{{
+    "calories": 칼로리(float),
+    "protein_g": 단백질_그램(float),
+    "fat_g": 지방_그램(float),
+    "carbs_g": 탄수화물_그램(float),
+    "note": "분석_방법_또는_주의사항"
+}}
+
+주의사항:
+- 1인분 기준으로 계산해주세요
+- 일반적인 재료의 양을 가정하여 계산해주세요
+- 조리 방법도 고려하여 칼로리를 계산해주세요
+- 숫자만 정확히 입력하고, JSON 형식을 정확히 지켜주세요
+"""
+
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "당신은 영양학 전문가입니다. 요리 레시피를 분석하여 정확한 영양 정보를 제공합니다.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.3,
+            max_tokens=500,
+        )
+
+        response_text = response.choices[0].message.content.strip()
+
+        try:
+            if "```json" in response_text:
+                response_text = response_text.split("```json")[1].split("```")[0].strip()
+            elif "```" in response_text:
+                response_text = response_text.split("```")[1].split("```")[0].strip()
+
+            nutrition_data = json.loads(response_text)
+
+            return {
+                "calories": float(nutrition_data.get("calories", 0.0)),
+                "protein_g": float(nutrition_data.get("protein_g", 0.0)),
+                "fat_g": float(nutrition_data.get("fat_g", 0.0)),
+                "carbs_g": float(nutrition_data.get("carbs_g", 0.0)),
+                "note": str(nutrition_data.get("note", "OpenAI API로 분석됨")),
+            }
+
+        except (json.JSONDecodeError, ValueError, KeyError) as e:
+            print(f"JSON 파싱 에러: {e}")
+            print(f"원본 응답: {response_text}")
+            return {
+                "calories": 500.0,
+                "protein_g": 20.0,
+                "fat_g": 15.0,
+                "carbs_g": 60.0,
+                "note": f"OpenAI 응답 파싱 실패 - 기본값 사용 (에러: {str(e)})",
+            }
+
+    except Exception as e:
+        print(f"OpenAI API 호출 에러: {e}")
+        return {
+            "calories": 550.0,
+            "protein_g": 20.0,
+            "fat_g": 15.0,
+            "carbs_g": 70.0,
+            "note": f"OpenAI API 호출 실패 - 기본값 사용 (에러: {str(e)})",
+        }
 
 def append_jsonl(path: str, event: Dict[str, Any]) -> None:
     with open(path, "a", encoding="utf-8") as f:
