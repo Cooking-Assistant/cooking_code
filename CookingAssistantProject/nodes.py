@@ -413,39 +413,39 @@ def _get_openai_client():
     """
     global openai_client
     if openai_client is None:
-        api_key = "PUT YOUR KEY"
-        # api_key = os.getenv("OPENAI_API_KEY")
+        #api_key = "PUT YOUR KEY"
+        api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise ValueError("OPENAI_API_KEY 환경변수가 설정되지 않았습니다.")
         openai_client = openai.OpenAI(api_key=api_key)
     return openai_client
 
 def translate_to_korean(text: str) -> str:
-     """
-     영어 레시피 제목/조리 단계를 자연스러운 한국어로 번역하는 함수
-     """
-     text = (text or "").strip()
-     if not text:
-         return text
+    """
+    영어 레시피 제목/조리 단계를 자연스러운 한국어로 번역하는 함수
+    - 이미 설정된 ChatOpenAI(_get_llm) 을 재사용해서 호출한다.
+    """
+    text = (text or "").strip()
+    if not text:
+        return text
 
-     try:
-         client = _get_openai_client()
-         response = client.chat.completions.create(
-             model="gpt-4o-mini",
-             messages=[
-                 {
-                     "role": "system",
-                     "content": "다음 영어 요리 이름이나 조리 단계를 자연스러운 한국어로 번역해 주세요. 불필요한 설명 없이 번역문만 답하세요.",
-                 },
-                 {"role": "user", "content": text},
-             ],
-             temperature=0.0,
-             max_tokens=256,
-         )
-         return response.choices[0].message.content.strip()
-     except Exception as e:
-         print(f"[WARN] 번역 실패: {e}")
-         return text
+    try:
+        llm = _get_llm()
+
+        system = SystemMessage(content=(
+            "당신은 번역가입니다.\n"
+            "입력으로 주어지는 영어 요리 이름이나 조리 단계를 자연스럽고 간단한 한국어로 번역하세요.\n"
+            "불필요한 설명 없이 번역문만 한 줄로 출력하세요."
+        ))
+        human = HumanMessage(content=text)
+
+        resp = llm.invoke([system, human])
+        return resp.content.strip()
+    except Exception as e:
+        print(f"[WARN] 번역 실패: {e}")
+        # 문제가 생기면 원문 그대로라도 보여주기
+        return text
+
 # ========= 영양성분 계산 =========
 
 def compute_nutrition(recipe_text: str) -> Nutrition:
@@ -531,6 +531,33 @@ def compute_nutrition(recipe_text: str) -> Nutrition:
 def append_jsonl(path: str, event: Dict[str, Any]) -> None:
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+
+# ========= 추천 리스트 포맷 (ID/매칭점수 숨김) =========
+
+def format_recommendations_ko(hits: List[Hit]) -> str:
+    """
+    사용자에게 보여줄 추천 레시피 목록을 한국어로 예쁘게 포맷한다.
+    - 번호 + 한글 제목(+영어 원제) + 주요 재료
+    - ID(r24)나 매칭 점수는 전혀 표시하지 않음
+    """
+    lines: List[str] = []
+
+    for i, h in enumerate(hits, 1):
+        title_en = h["title"]
+        title_ko = translate_to_korean(title_en)  # 제목을 한국어로 번역
+        ings = get_ingredients_for_hit(h)         # 원본 레시피에서 재료 가져오기
+
+        if ings:
+            main_ings = ", ".join(ings[:4])
+            lines.append(
+                f"{i}. {title_ko} ({title_en})\n"
+                f"   - 주요 재료: {main_ings}"
+            )
+        else:
+            lines.append(f"{i}. {title_ko} ({title_en})")
+
+    return "\n\n".join(lines)
 
 # ========= Agents =========
 
