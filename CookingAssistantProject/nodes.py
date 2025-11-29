@@ -752,6 +752,7 @@ def chef_agent(state: State) -> State:
     # 4) 다음 스텝 진행
     if act == "next_step" and idx < len(steps):
         step = steps[idx]
+        step_ko = translate_to_korean(step)
         return {
             "step_idx": idx + 1,
             "last_agent": "chef",
