@@ -122,7 +122,7 @@ def _get_chef_llm():
     global _chef_llm
     if _chef_llm is None:
         _chef_llm = ChatOpenAI(
-            model="gpt-4.1-mini", 
+            model="gpt-4o-mini", 
             temperature=0.3,
         )
     return _chef_llm
