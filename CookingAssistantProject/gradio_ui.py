@@ -27,7 +27,7 @@ try:
         print("3. 아래 코드에서 직접 설정:")
         
         # 임시로 더미 키 설정 (실제로는 동작하지 않음)
-        os.environ["OPENAI_API_KEY"] = "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"
+        os.environ["OPENAI_API_KEY"] = ""
         print("4. 현재는 더미 키로 설정되어 실제 동작하지 않을 수 있습니다.")
     
     from langgraph.graph import StateGraph, END
