@@ -366,21 +366,6 @@ def llm_answer_chef_question(
     resp = llm.invoke(messages) # LLM 호출 및 답변 생성
     return resp.content.strip() # LLM이 응답한 텍스트만 반환
 
-openai_client = None
-
-def _get_openai_client():
-    """
-    OpenAI 클라이언트를 초기화하거나 기존 인스턴스를 반환
-    """
-    global openai_client
-    if openai_client is None:
-        api_key = "put your api_key"
-        # api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise ValueError("OPENAI_API_KEY 환경변수가 설정되지 않았습니다.")
-        openai_client = openai.OpenAI(api_key=api_key)
-    return openai_client
-
 # ========= 영양성분 계산 =========
 
 def compute_nutrition(recipe_text: str) -> Nutrition:
