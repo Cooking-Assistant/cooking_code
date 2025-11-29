@@ -34,12 +34,17 @@ try:
     from langgraph.checkpoint.sqlite import SqliteSaver
     from state import State
     from nodes import (
-        planner_agent,
-        choose_agent,
-        chef_agent,
-        nutrition_agent,
-        memory_agent,
-    )
+    planner_agent,
+    choose_agent,
+    chef_agent,
+    nutrition_agent,
+    memory_agent,
+    translate_to_korean,      # 🔹 제목 한국어 번역용
+    get_ingredients_for_hit,  # 🔹 주요 재료 뽑는용
+    get_ingredients_for_hit,   # ✅ 추가
+    translate_to_korean,
+)
+
 except ImportError as e:
     print(f"백엔드 모듈을 찾을 수 없습니다: {e}")
     sys.exit(1)
@@ -95,22 +100,41 @@ def get_recipe_recommendations(user_input: str, topk: int = 5) -> Tuple[str, str
         current_state = state
         current_step = "select"
         
-        # 추천 결과 생성
         result = "🔍 **검색 완료! 맞춤 레시피를 찾았습니다**\n\n"
-        
+
         if state.get("candidates"):
             for i, candidate in enumerate(state["candidates"], 1):
-                score = int(candidate["score"] * 100)
-                result += f"**{i}. {candidate['title']}** (ID: {candidate['id']}, 매칭도: {score}%)\n"
-                result += f"   💡 {candidate['text'][:80]}...\n\n"
-            
-            # 후보 정보를 JSON으로 저장
+                # 제목 한/영
+                title_en = candidate["title"]
+                title_ko = translate_to_korean(title_en)
+
+                # 이 레시피에 필요한 전체 재료 (영어 리스트)
+                ingredients_en = get_ingredients_for_hit(candidate) or []
+
+                # 각 재료를 개별적으로 한국어로 번역
+                ingredients_ko = [
+                    translate_to_korean(ing) for ing in ingredients_en
+                ] if ingredients_en else []
+
+                # 1) 제목
+                result += f"**{i}. {title_ko}** ({title_en})\n"
+
+                # 2) 필요 재료(한국어, 줄바꿈)
+                if ingredients_en:
+                    result += "   🧾 필요 재료 (한국어):\n"
+                    for ing_ko in ingredients_ko:
+                        result += f"   - {ing_ko}\n"
+
+                    result += "\n"
+                else:
+                    result += "   🧾 필요 재료 정보를 찾지 못했어요.\n\n"
+
+            # 후보 정보를 JSON으로 저장 (기존 코드 그대로 유지)
             candidates_json = json.dumps([
                 {"num": i, "id": c["id"], "title": c["title"], "score": c["score"]}
                 for i, c in enumerate(state["candidates"], 1)
             ], ensure_ascii=False, indent=2)
-            
-            # 선택 섹션을 표시하도록 업데이트
+
             return result, candidates_json, gr.update(visible=True)
         else:
             return "검색 결과가 없습니다.", "[]", gr.update()
