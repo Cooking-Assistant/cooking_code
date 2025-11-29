@@ -118,11 +118,11 @@ def _load_recipes():
         _recipes = recs
     return _recipes
 
-def _get_chef_llm():
+def _get_llm():
     global _chef_llm
     if _chef_llm is None:
         _chef_llm = ChatOpenAI(
-            model="gpt-4o-mini", 
+            model="gpt-4.1-mini", 
             temperature=0.3,
         )
     return _chef_llm
@@ -338,7 +338,7 @@ def llm_answer_chef_question(
     current_step: Optional[str] = None,
 ) -> str:
     
-    llm = _get_chef_llm()
+    llm = _get_llm()
 
     system = SystemMessage(content=(
         "당신은 요리 조리 과정을 안내하는 셰프 에이전트입니다.\n"
@@ -366,6 +366,21 @@ def llm_answer_chef_question(
     resp = llm.invoke(messages) # LLM 호출 및 답변 생성
     return resp.content.strip() # LLM이 응답한 텍스트만 반환
 
+openai_client = None
+
+def _get_openai_client():
+    """
+    OpenAI 클라이언트를 초기화하거나 기존 인스턴스를 반환
+    """
+    global openai_client
+    if openai_client is None:
+        api_key = "put your api_key"
+        # api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise ValueError("OPENAI_API_KEY 환경변수가 설정되지 않았습니다.")
+        openai_client = openai.OpenAI(api_key=api_key)
+    return openai_client
+
 # ========= 영양성분 계산 =========
 
 def compute_nutrition(recipe_text: str) -> Nutrition:
@@ -374,7 +389,7 @@ def compute_nutrition(recipe_text: str) -> Nutrition:
     """
     try:
         # ChatOpenAI 인스턴스 생성
-        nutrition_llm = _get_chef_llm()
+        nutrition_llm = _get_llm()
 
         prompt = f"""
 다음은 요리 레시피입니다. 이 레시피를 바탕으로 1인분 기준의 영양 정보를 정확하게 분석해주세요.
@@ -418,7 +433,6 @@ def compute_nutrition(recipe_text: str) -> Nutrition:
                 response_text = response_text.split("```")[1].split("```")[0].strip()
 
             nutrition_data = json.loads(response_text)
-
             return {
                 "calories": float(nutrition_data.get("calories", 0.0)),
                 "protein_g": float(nutrition_data.get("protein_g", 0.0)),
@@ -437,7 +451,7 @@ def compute_nutrition(recipe_text: str) -> Nutrition:
                 "carbs_g": 60.0,
                 "note": f"ChatOpenAI 응답 파싱 실패 - 기본값 사용 (에러: {str(e)})",
             }
-
+            
     except Exception as e:
         print(f"ChatOpenAI 호출 에러: {e}")
         return {
@@ -573,8 +587,8 @@ def choose_agent(state: State) -> State:
                 "role": "assistant",
                 "content": (
                     f"✅ '{hit['title']}' 레시피로 진행합니다!\n\n"
-                    f"총 {len(steps)}단계의 조리 과정이 있습니다.\n"
-                    f"'action=next_step'으로 조리를 시작해 주세요."
+                    f"총 {len(steps)} 단계의 조리 과정이 있습니다.\n"
+                    f"'다음 단계' 버튼을 누르거나, '다음'이라고 입력해 조리를 시작해 주세요."
                 ),
             }
         ],
@@ -607,28 +621,47 @@ def chef_agent(state: State) -> State:
         return {
             "last_agent": "chef",
             "next_intent": "cook_next",
-            "messages":[{"role":"assistant","content":f"Q: {q}\nA: {ans}"}],
+            "messages":[{"role": "assistant", "content": ans}],
         }
         
     # 2) 현재 스텝 반복 (레시피 다시 보여줌)
-    if act == "repeat_step" and idx > 0 and idx <= len(steps):
-        step = steps[idx - 1]
-        return {
-            "last_agent": "chef",
-            "next_intent": "cook_next",
-            "messages":[{"role":"assistant","content":f"[Step {idx}/{len(steps)} 다시 안내] {step}"}],
-        }
+    if act == "repeat_step":
+        # 아직 조리를 시작하지 않은 상태에서 "다시"를 누르면 1단계부터 안내
+        if idx == 0 and steps:
+            step = steps[0]
+            return {
+                "step_idx": 1,
+                "last_agent": "chef",
+                "next_intent": "cook_next",
+                "messages": [{
+                    "role": "assistant",
+                    "content": f"아직 조리를 시작하지 않아서 첫 번째 단계부터 안내할게요.\n"
+                               f"[Step 1/{len(steps)}] {step}"
+                }],
+            }
+
+        # 이미 진행 중인 단계가 있을 때는 그 단계 다시 안내
+        if 0 < idx <= len(steps):
+            step = steps[idx - 1]
+            return {
+                "last_agent": "chef",
+                "next_intent": "cook_next",
+                "messages": [{
+                    "role": "assistant",
+                    "content": f"[Step {idx}/{len(steps)} 다시 안내] {step}"
+                }],
+            }
     
     # 3) 이전 스텝으로 이동
     if act == "prev_step":
         if idx <= 1:
-            # 이미 첫 단계 이전이면 그냥 첫 단계 또는 안내 메시지
             if steps:
                 return {
                     "step_idx": 1,
                     "last_agent": "chef",
                     "next_intent": "cook_next",
-                    "messages":[{"role":"assistant","content":f"이미 첫 번째 단계입니다. [Step 1/{len(steps)}] {steps[0]}"}],
+                    "messages":[{"role":"assistant",
+                        "content": f"아직 이전 단계는 없어요. 첫 번째 단계부터 안내할게요.\n[Step 1/{len(steps)}] {steps[0]}"}],
                 }
             else:
                 return {
@@ -663,12 +696,60 @@ def chef_agent(state: State) -> State:
             "next_intent": "analyze_nutrition",
             "messages":[{"role":"assistant","content":"조리를 마친 것으로 처리할게요. 이제 영양 정보를 계산해 보겠습니다."}],
         }
-    
-    # 스텝이 끝났거나, 유효한 action이 아닌 경우 바로 종료하고 영양 분석으로 이동
+        
+    # 6) 레시피 스텝을 모두 완료한 경우 자동 종료
+    if steps and idx >= len(steps):
+        msg = (
+            "모든 조리 단계를 이미 마쳤어요.\n"
+            "영양 정보를 계산하려면 '조리 완료' 버튼을 눌러 주세요."
+        )
+        return {
+            "last_agent": "chef",
+            "next_intent": "cook_next",  # 아직 조리 모드 유지
+            "messages": [{"role": "assistant", "content": msg}],
+        }
+        
+    # 7) 그 외 (알 수 없는 action)는 종료하지 말고 조리 모드 유지
+    if steps:
+        # 이미 진행 중인 단계가 있으면 그 단계 다시 안내
+        if 0 < idx <= len(steps):
+            step = steps[idx - 1]
+            msg = (
+                "요청을 잘 이해하지 못했어요. 현재 단계는 "
+                f"[Step {idx}/{len(steps)}] {step} 입니다.\n"
+                "다음 단계로 가고 싶다면 'next_step', "
+                "이전 단계는 'prev_step', 다시 듣고 싶다면 'repeat_step', "
+                "또는 조리와 관련된 질문을 해 주세요."
+            )
+            return {
+                "last_agent": "chef",
+                "next_intent": "cook_next",
+                "messages": [{"role": "assistant", "content": msg}],
+            }
+        else:
+            # 아직 step_idx가 0이거나 이상하면 첫 단계로 유도
+            step = steps[0]
+            msg = (
+                "요청을 잘 이해하지 못했어요. 조리를 시작해 볼까요?\n"
+                f"[Step 1/{len(steps)}] {step}"
+            )
+            return {
+                "step_idx": 1,
+                "last_agent": "chef",
+                "next_intent": "cook_next",
+                "messages": [{"role": "assistant", "content": msg}],
+            }
+
+    # steps 자체가 없는 경우
     return {
         "last_agent": "chef",
-        "next_intent": "analyze_nutrition",
-        "messages":[{"role":"assistant","content":"조리를 마쳤다고 판단했어요. 이제 영양 정보를 계산해 보겠습니다."}],
+        "next_intent": "cook_next",
+        "messages": [
+            {
+                "role": "assistant",
+                "content": "아직 불러온 레시피가 없어요. 레시피를 먼저 선택해 주세요.",
+            }
+        ],
     }
 
 
