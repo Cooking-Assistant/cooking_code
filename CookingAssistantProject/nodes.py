@@ -118,6 +118,45 @@ def _load_recipes():
         _recipes = recs
     return _recipes
 
+ 
+def get_ingredients_for_hit(hit: Dict[str, Any]) -> List[str]:
+     """
+ 선택된 hit(id=r숫자) 기준으로 원본 레시피에서 재료 리스트를 꺼내는 함수
+     """
+     rid = str(hit.get("id", ""))
+     m = re.match(r"r(\d+)", rid)
+     if not m:
+         return []
+ 
+     idx = int(m.group(1))
+     recipes = _load_recipes()
+     if not (0 <= idx < len(recipes)):
+         return []
+ 
+     rec = recipes[idx]
+     # 데이터 구조에 따라 우선순위 정해서 꺼내기
+     ings = (
+         rec.get("ingredients_std")
+         or rec.get("ingredients")
+         or rec.get("ingredients_base")
+         or []
+     )
+ 
+     # 문자열로 들어있는 경우 최소 리스트로 변환
+     if isinstance(ings, str):
+         try:
+             import json
+             tmp = json.loads(ings)
+             if isinstance(tmp, list):
+                 ings = tmp
+             else:
+                 ings = [ings]
+         except Exception:
+             ings = [ings]
+ 
+     return [str(x) for x in ings]
+
+
 def _get_llm():
     global _chef_llm
     if _chef_llm is None:
@@ -374,13 +413,39 @@ def _get_openai_client():
     """
     global openai_client
     if openai_client is None:
-        api_key = "put your api_key"
+        api_key = "PUT YOUR API_KEY"
         # api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise ValueError("OPENAI_API_KEY 환경변수가 설정되지 않았습니다.")
         openai_client = openai.OpenAI(api_key=api_key)
     return openai_client
 
+def translate_to_korean(text: str) -> str:
+     """
+     영어 레시피 제목/조리 단계를 자연스러운 한국어로 번역하는 함수
+     """
+     text = (text or "").strip()
+     if not text:
+         return text
+
+     try:
+         client = _get_openai_client()
+         response = client.chat.completions.create(
+             model="gpt-4o-mini",
+             messages=[
+                 {
+                     "role": "system",
+                     "content": "다음 영어 요리 이름이나 조리 단계를 자연스러운 한국어로 번역해 주세요. 불필요한 설명 없이 번역문만 답하세요.",
+                 },
+                 {"role": "user", "content": text},
+             ],
+             temperature=0.0,
+             max_tokens=256,
+         )
+         return response.choices[0].message.content.strip()
+     except Exception as e:
+         print(f"[WARN] 번역 실패: {e}")
+         return text
 # ========= 영양성분 계산 =========
 
 def compute_nutrition(recipe_text: str) -> Nutrition:
@@ -497,7 +562,10 @@ def planner_agent(state: State) -> State:
     
     recommendations = []
     for i, h in enumerate(hits, 1):
-        recommendations.append(f"{i}. [{h['id']}] {h['title']}")
+         title_en = h["title"]
+         title_ko = translate_to_korean(title_en)
+         # 영어 제목도 같이 보고 싶으면 () 안에 유지
+         recommendations.append(f"{i}. [{h['id']}] {title_ko} ({title_en})")
 
     msg_result = {
         "role": "assistant",
@@ -533,7 +601,9 @@ def choose_agent(state: State) -> State:
         candidates = state.get("candidates", [])
         recommendations = []
         for i, h in enumerate(candidates, 1):
-            recommendations.append(f"{i}. [{h['id']}] {h['title']}")
+             title_en = h["title"]
+             title_ko = translate_to_korean(title_en)
+             recommendations.append(f"{i}. [{h['id']}] {title_ko} ({title_en})")
 
         return {
             "last_agent": "choose",
@@ -586,7 +656,7 @@ def choose_agent(state: State) -> State:
             {
                 "role": "assistant",
                 "content": (
-                    f"✅ '{hit['title']}' 레시피로 진행합니다!\n\n"
+                    f"✅ '{translate_to_korean(hit['title'])}' 레시피로 진행합니다!\n\n"
                     f"총 {len(steps)} 단계의 조리 과정이 있습니다.\n"
                     f"'다음 단계' 버튼을 누르거나, '다음'이라고 입력해 조리를 시작해 주세요."
                 ),
@@ -661,7 +731,7 @@ def chef_agent(state: State) -> State:
                     "last_agent": "chef",
                     "next_intent": "cook_next",
                     "messages":[{"role":"assistant",
-                        "content": f"아직 이전 단계는 없어요. 첫 번째 단계부터 안내할게요.\n[Step 1/{len(steps)}] {steps[0]}"}],
+                        "content": f"아직 이전 단계는 없어요. 첫 번째 단계부터 안내할게요.\n[Step 1/{len(steps)}] {translate_to_korean(steps[0])}"}],
                 }
             else:
                 return {
@@ -676,17 +746,18 @@ def chef_agent(state: State) -> State:
             "step_idx": new_idx,
             "last_agent": "chef",
             "next_intent": "cook_next",
-            "messages":[{"role":"assistant","content":f"[Step {new_idx}/{len(steps)}] {step}"}],
+            "messages":[{"role":"assistant","content":f"[Step {new_idx}/{len(steps)}] {translate_to_korean(step)}"}],
         }
 
     # 4) 다음 스텝 진행
     if act == "next_step" and idx < len(steps):
         step = steps[idx]
+        step_ko = translate_to_korean(step)
         return {
             "step_idx": idx + 1,
             "last_agent": "chef",
             "next_intent": "cook_next",  # 여전히 다음 스텝 가능
-            "messages":[{"role":"assistant","content":f"[Step {idx+1}/{len(steps)}] {step}"}],
+            "messages":[{"role":"assistant","content":f"[Step {idx+1}/{len(steps)}] {step_ko}"}],
         }
     
     # 5) stop이 들어오면 바로 종료하고 영양 분석으로 이동
