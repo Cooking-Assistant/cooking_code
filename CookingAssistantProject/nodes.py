@@ -385,11 +385,11 @@ def _get_openai_client():
 
 def compute_nutrition(recipe_text: str) -> Nutrition:
     """
-    OpenAI API를 사용하여 레시피에서 영양 정보를 추출합니다.
-    (지수 버전 코드 그대로 사용)
+    ChatOpenAI를 사용하여 레시피에서 영양 정보를 추출합니다.
     """
     try:
-        client = _get_openai_client()
+        # ChatOpenAI 인스턴스 생성
+        nutrition_llm = _get_chef_llm()
 
         prompt = f"""
 다음은 요리 레시피입니다. 이 레시피를 바탕으로 1인분 기준의 영양 정보를 정확하게 분석해주세요.
@@ -418,23 +418,15 @@ def compute_nutrition(recipe_text: str) -> Nutrition:
 - JSON 바깥의 다른 텍스트는 절대 출력하지 마세요.
 """
 
-
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "당신은 영양학 전문가입니다. 요리 레시피를 분석하여 정확한 영양 정보를 제공합니다.",
-                },
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.3,
-            max_tokens=500,
-        )
-
-        response_text = response.choices[0].message.content.strip()
+        system = SystemMessage(content="당신은 영양학 전문가입니다. 요리 레시피를 분석하여 정확한 영양 정보를 제공합니다.")
+        human = HumanMessage(content=prompt)
+        
+        messages = [system, human]
+        response = nutrition_llm.invoke(messages)
+        response_text = response.content.strip()
 
         try:
+            # JSON 형식 정리 (코드 블록 제거)
             if "```json" in response_text:
                 response_text = response_text.split("```json")[1].split("```")[0].strip()
             elif "```" in response_text:
@@ -447,7 +439,7 @@ def compute_nutrition(recipe_text: str) -> Nutrition:
                 "protein_g": float(nutrition_data.get("protein_g", 0.0)),
                 "fat_g": float(nutrition_data.get("fat_g", 0.0)),
                 "carbs_g": float(nutrition_data.get("carbs_g", 0.0)),
-                "note": str(nutrition_data.get("note", "OpenAI API로 분석됨")),
+                "note": str(nutrition_data.get("note", "ChatOpenAI로 분석됨")),
             }
 
         except (json.JSONDecodeError, ValueError, KeyError) as e:
@@ -458,18 +450,19 @@ def compute_nutrition(recipe_text: str) -> Nutrition:
                 "protein_g": 20.0,
                 "fat_g": 15.0,
                 "carbs_g": 60.0,
-                "note": f"OpenAI 응답 파싱 실패 - 기본값 사용 (에러: {str(e)})",
+                "note": f"ChatOpenAI 응답 파싱 실패 - 기본값 사용 (에러: {str(e)})",
             }
 
     except Exception as e:
-        print(f"OpenAI API 호출 에러: {e}")
+        print(f"ChatOpenAI 호출 에러: {e}")
         return {
             "calories": 550.0,
             "protein_g": 20.0,
             "fat_g": 15.0,
             "carbs_g": 70.0,
-            "note": f"OpenAI API 호출 실패 - 기본값 사용 (에러: {str(e)})",
+            "note": f"ChatOpenAI 호출 실패 - 기본값 사용 (에러: {str(e)})",
         }
+
 
 def append_jsonl(path: str, event: Dict[str, Any]) -> None:
     with open(path, "a", encoding="utf-8") as f:
