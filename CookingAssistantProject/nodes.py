@@ -413,7 +413,7 @@ def _get_openai_client():
     """
     global openai_client
     if openai_client is None:
-        api_key = "PUT YOUR API_KEY"
+        api_key = "PUT YOUR KEY"
         # api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise ValueError("OPENAI_API_KEY 환경변수가 설정되지 않았습니다.")
