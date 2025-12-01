@@ -15,10 +15,10 @@ from langchain_core.messages import HumanMessage, SystemMessage
 # ======== 경로 설정 ========
 
 ROOT = Path(__file__).resolve().parent
-INDEX_DIR = ROOT / "data" / "test30" 
-FAISS_PATH = INDEX_DIR / "recipes30.faiss"
-ROWMAP_PATH = INDEX_DIR / "rows30.map.csv"
-RECIPES_PATH = INDEX_DIR / "recipes30_clean.jsonl"
+INDEX_DIR = ROOT / "data" / "test1000" 
+FAISS_PATH = INDEX_DIR / "recipes1000.faiss"
+ROWMAP_PATH = INDEX_DIR / "rows1000.map.csv"
+RECIPES_PATH = INDEX_DIR / "recipes1000_clean.jsonl"
 
 _embed_model = None
 _faiss = None
@@ -405,21 +405,6 @@ def llm_answer_chef_question(
     resp = llm.invoke(messages) # LLM 호출 및 답변 생성
     return resp.content.strip() # LLM이 응답한 텍스트만 반환
 
-openai_client = None
-
-def _get_openai_client():
-    """
-    OpenAI 클라이언트를 초기화하거나 기존 인스턴스를 반환
-    """
-    global openai_client
-    if openai_client is None:
-        #api_key = "PUT YOUR KEY"
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise ValueError("OPENAI_API_KEY 환경변수가 설정되지 않았습니다.")
-        openai_client = openai.OpenAI(api_key=api_key)
-    return openai_client
-
 def translate_to_korean(text: str) -> str:
     """
     영어 레시피 제목/조리 단계를 자연스러운 한국어로 번역하는 함수
@@ -539,7 +524,7 @@ def format_recommendations_ko(hits: List[Hit]) -> str:
     """
     사용자에게 보여줄 추천 레시피 목록을 한국어로 예쁘게 포맷한다.
     - 번호 + 한글 제목(+영어 원제) + 주요 재료
-    - ID(r24)나 매칭 점수는 전혀 표시하지 않음
+    - 번호나 매칭 점수는 전혀 표시하지 않음
     """
     lines: List[str] = []
 
@@ -703,7 +688,6 @@ def chef_agent(state: State) -> State:
         steps = state.get("steps", []) or [] # 현재 레시피 step
         idx = state.get("step_idx", 0) # step index
 
-        # 현재 혹은 직전 스텝을 같이 넘겨주면 답변 품질 ↑
         cur_step = None
         if 0 <= idx - 1 < len(steps):
             cur_step = steps[idx - 1]
@@ -815,9 +799,9 @@ def chef_agent(state: State) -> State:
             msg = (
                 "요청을 잘 이해하지 못했어요. 현재 단계는 "
                 f"[Step {idx}/{len(steps)}] {step} 입니다.\n"
-                "다음 단계로 가고 싶다면 'next_step', "
-                "이전 단계는 'prev_step', 다시 듣고 싶다면 'repeat_step', "
-                "또는 조리와 관련된 질문을 해 주세요."
+                "다음 단계로 가고 싶다면 '다음 단계' 버튼을, "
+                "이전 단계는 이전 단계 버튼을, 조리가 완료되었으면 '조리 완료' 버튼을 클릭해주세요."
+                "또는 조리 시 궁금한 게 있다면 질문을 입력해 주세요."
             )
             return {
                 "last_agent": "chef",
@@ -854,7 +838,7 @@ def chef_agent(state: State) -> State:
 def nutrition_agent(state: State) -> State:
     nut = compute_nutrition(state.get("recipe_text", "") or "")
     text = (
-        f"📊 영양 정보 (대략 추정)\n\n"
+        f"📊 영양 정보\n\n"
         f"• 칼로리: {nut['calories']}kcal\n"
         f"• 단백질: {nut['protein_g']}g\n"
         f"• 지방: {nut['fat_g']}g\n"
