@@ -121,7 +121,7 @@ def get_recipe_recommendations(user_input: str, topk: int = 5) -> Tuple[str, str
 
                 # 2) 필요 재료(한국어, 줄바꿈)
                 if ingredients_en:
-                    result += "   🧾 필요 재료 (한국어):\n"
+                    result += "\n🧾 필요 재료 (한국어):\n"
                     for ing_ko in ingredients_ko:
                         result += f"   - {ing_ko}\n"
 
@@ -147,7 +147,7 @@ def select_recipe(selection: str) -> Tuple[str, Dict, Dict]:
     global current_state, current_step
     
     if not selection.strip():
-        return "레시피 번호나 ID를 입력해주세요.", gr.update(), gr.update()
+        return "레시피 번호를 입력해주세요.", gr.update(), gr.update()
     
     try:
         # 숫자 입력 처리
@@ -317,14 +317,13 @@ def get_nutrition_info() -> Tuple[str, Dict]:
         nutrition_data = current_state.get("nutrition", {})
         if nutrition_data:
             # 직접 영양 정보 HTML 구성
-            content = f""" 영양 정보 
-
-• 칼로리: {nutrition_data.get('calories', 0)}kcal
-• 단백질: {nutrition_data.get('protein_g', 0)}g
-• 지방: {nutrition_data.get('fat_g', 0)}g
-• 탄수화물: {nutrition_data.get('carbs_g', 0)}g
-
-💡 **건강 팁:** {nutrition_data.get('note', '영양 정보를 확인하세요.')}"""
+            content = (
+    f"• 칼로리: {nutrition_data.get('calories', 0)}kcal\n"
+    f"• 단백질: {nutrition_data.get('protein_g', 0)}g\n"
+    f"• 지방: {nutrition_data.get('fat_g', 0)}g\n"
+    f"• 탄수화물: {nutrition_data.get('carbs_g', 0)}g\n\n"
+    f"💡 **건강 팁:** {nutrition_data.get('note', '영양 정보를 확인하세요.')}"
+)
             
             result += f"<div style='font-size: 16px; line-height: 1.6; margin-bottom: 15px; white-space: pre-line;'>{content}</div>"
         else:
@@ -444,7 +443,7 @@ def create_interface():
             with gr.Row():
                 selection_input = gr.Textbox(
                     label="선택할 레시피",
-                    placeholder="번호 (예: 2) 또는 ID (예: r13) 입력",
+                    placeholder="번호 입력 (예: 2)",
                     lines=1,
                     scale=4
                 )
