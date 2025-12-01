@@ -121,7 +121,7 @@ def get_recipe_recommendations(user_input: str, topk: int = 5) -> Tuple[str, str
 
                 # 2) 필요 재료(한국어, 줄바꿈)
                 if ingredients_en:
-                    result += "\n🧾 필요 재료 (한국어):\n"
+                    result += "\n🧾 필요 재료:\n"
                     for ing_ko in ingredients_ko:
                         result += f"   - {ing_ko}\n"
 
