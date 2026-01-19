@@ -431,6 +431,32 @@ def translate_to_korean(text: str) -> str:
         # 문제가 생기면 원문 그대로라도 보여주기
         return text
 
+def translate_to_korean(text: str) -> str:
+     """
+     영어 레시피 제목/조리 단계를 자연스러운 한국어로 번역하는 함수
+     """
+     text = (text or "").strip()
+     if not text:
+         return text
+
+     try:
+         client = _get_openai_client()
+         response = client.chat.completions.create(
+             model="gpt-4o-mini",
+             messages=[
+                 {
+                     "role": "system",
+                     "content": "다음 영어 요리 이름이나 조리 단계를 자연스러운 한국어로 번역해 주세요. 불필요한 설명 없이 번역문만 답하세요.",
+                 },
+                 {"role": "user", "content": text},
+             ],
+             temperature=0.0,
+             max_tokens=256,
+         )
+         return response.choices[0].message.content.strip()
+     except Exception as e:
+         print(f"[WARN] 번역 실패: {e}")
+         return text
 # ========= 영양성분 계산 =========
 
 def compute_nutrition(recipe_text: str) -> Nutrition:
